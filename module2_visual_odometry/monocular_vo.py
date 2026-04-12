@@ -30,8 +30,10 @@ Ctrl+C generates a full report + trajectory plot.
 import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import Image
+from geometry_msgs.msg import PoseStamped
 from px4_msgs.msg import VehicleLocalPosition
 from cv_bridge import CvBridge
+from scipy.spatial.transform import Rotation
 import cv2
 import numpy as np
 import time
@@ -94,6 +96,11 @@ class MonocularVO(Node):
         self.frame_count  = 0
         self.kf_count     = 0
         self.start_time   = time.time()
+
+        # ── Publisher for Step 8 EKF VIO ─────────────────────────────────────
+        self.pose_pub = self.create_publisher(
+            PoseStamped, '/monocular_vo/pose', 10
+        )
 
         # ── Subscriptions ─────────────────────────────────────────────────────
         cam_topic = (
@@ -279,6 +286,20 @@ class MonocularVO(Node):
             f"{self.t_world[1,0]:6.2f}, "
             f"{self.t_world[2,0]:6.2f}]"
         )
+
+        # ── Publish pose for Step 8 EKF VIO ──────────────────────────────────
+        pose_msg = PoseStamped()
+        pose_msg.header.stamp    = self.get_clock().now().to_msg()
+        pose_msg.header.frame_id = 'camera'
+        pose_msg.pose.position.x = float(self.t_world[0, 0])
+        pose_msg.pose.position.y = float(self.t_world[1, 0])
+        pose_msg.pose.position.z = float(self.t_world[2, 0])
+        q = Rotation.from_matrix(self.R_world).as_quat()   # [x,y,z,w]
+        pose_msg.pose.orientation.x = float(q[0])
+        pose_msg.pose.orientation.y = float(q[1])
+        pose_msg.pose.orientation.z = float(q[2])
+        pose_msg.pose.orientation.w = float(q[3])
+        self.pose_pub.publish(pose_msg)
 
         # ── New keyframe ──────────────────────────────────────────────────────
         self.kf_gray = gray
