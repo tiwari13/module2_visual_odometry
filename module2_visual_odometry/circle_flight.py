@@ -23,6 +23,7 @@ from px4_msgs.msg import (
     TrajectorySetpoint,
     VehicleCommand,
     VehicleLocalPosition,
+    VehicleStatus,
 )
 import numpy as np
 import math
@@ -76,15 +77,22 @@ class CircleFlight(Node):
             '/fmu/out/vehicle_local_position_v1',
             self._pos_cb, sensor_qos,
         )
+        self.create_subscription(
+            VehicleStatus,
+            '/fmu/out/vehicle_status_v1',
+            self._status_cb, sensor_qos,
+        )
 
-        self.pos     = None
-        self.state   = self.INIT
-        self.counter = 0
-        self.t_fly   = 0.0
-        self.total_angle = 0.0
-        self.armed   = False
+        self.pos           = None
+        self.vehicle_status = None   # latest VehicleStatus
+        self.state         = self.INIT
+        self.counter       = 0
+        self.t_fly         = 0.0
+        self.total_angle   = 0.0
+        self.armed         = False
+        self.arm_attempts  = 0
+        self.arm_sent_at   = None   # counter tick when arm cmd was last sent
 
-        # Takeoff target
         self.takeoff_pt = [0.0, 0.0, HEIGHT]
 
         self.create_timer(0.05, self._tick)   # 20 Hz
@@ -97,23 +105,68 @@ class CircleFlight(Node):
     def _pos_cb(self, msg):
         self.pos = [msg.x, msg.y, msg.z]
 
+    def _status_cb(self, msg: VehicleStatus):
+        prev = self.vehicle_status
+        self.vehicle_status = msg
+        # Log whenever key fields change
+        if prev is None or prev.arming_state != msg.arming_state:
+            self.get_logger().info(
+                f'VehicleStatus: arming_state={msg.arming_state}  '
+                f'nav_state={msg.nav_state}  '
+                f'pre_flight_checks_pass={msg.pre_flight_checks_pass}'
+            )
+
     # ── Main tick ─────────────────────────────────────────────────────────────
     def _tick(self):
         self._pub_offboard()
 
-        if self.state == self.INIT:
+if self.state == self.INIT:
             self._pub_setpoint(self.takeoff_pt)
-            # Send setpoints for 1s (20 ticks) before attempting mode switch
-            # Re-send every 20 ticks until confirmed armed (PX4 may ignore first attempt)
+
+            # Check VehicleStatus for actual arm confirmation
+            if self.vehicle_status is not None:
+                arming_state = self.vehicle_status.arming_state
+                preflight_ok = self.vehicle_status.pre_flight_checks_pass
+                nav_state    = self.vehicle_status.nav_state
+
+                # arming_state == 2 → ARMED
+                if arming_state == 2 and not self.armed:
+                    self.armed = True
+                    self.get_logger().info(
+                        f'ARMED (arming_state=2, nav_state={nav_state}) — taking off...'
+                    )
+                    self.state = self.TAKEOFF
+                    self.counter += 1
+                    return
+
+            # Every 20 ticks (1 s) attempt mode switch + arm
             if self.counter >= 20 and self.counter % 20 == 0 and not self.armed:
-                self.get_logger().info(f"Sending offboard + arm (attempt {self.counter // 20})...")
+                self.arm_attempts += 1
+                preflight_ok = (self.vehicle_status.pre_flight_checks_pass
+                                if self.vehicle_status is not None else None)
+
+                self.get_logger().info(
+                    f'Arm attempt {self.arm_attempts}  '
+                    f'preflight_ok={preflight_ok}  '
+                    f'arming_state={self.vehicle_status.arming_state if self.vehicle_status else "?"}'
+                )
+
+                # Switch to offboard mode first
                 self._send_cmd(VehicleCommand.VEHICLE_CMD_DO_SET_MODE, 1.0, 6.0)
-                self._send_cmd(VehicleCommand.VEHICLE_CMD_COMPONENT_ARM_DISARM, 1.0)
-            if self.counter >= 20 and self.pos is not None and not self.armed:
-                # Detect arming by checking if drone is responding (z starts changing)
-                self.armed = True
-                self.get_logger().info("Armed — taking off...")
-                self.state = self.TAKEOFF
+
+                if self.arm_attempts <= 3:
+                    # Normal arm
+                    self._send_cmd(VehicleCommand.VEHICLE_CMD_COMPONENT_ARM_DISARM, 1.0)
+                else:
+                    # Force-arm (bypass preflight checks) after 3 normal attempts
+                    self.get_logger().warn(
+                        f'Normal arm failed {self.arm_attempts - 1} times — '
+                        f'sending FORCE-ARM (param2=21196)'
+                    )
+                    self._send_cmd(VehicleCommand.VEHICLE_CMD_COMPONENT_ARM_DISARM, 1.0, 21196.0)
+
+                self.arm_sent_at = self.counter
+
             self.counter += 1
 
         elif self.state == self.TAKEOFF:
