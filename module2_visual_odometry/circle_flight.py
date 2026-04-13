@@ -120,7 +120,7 @@ class CircleFlight(Node):
     def _tick(self):
         self._pub_offboard()
 
-if self.state == self.INIT:
+        if self.state == self.INIT:
             self._pub_setpoint(self.takeoff_pt)
 
             # Check VehicleStatus for actual arm confirmation
