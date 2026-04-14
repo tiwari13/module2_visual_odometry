@@ -118,6 +118,8 @@ class CircleFlight(Node):
 
     # ── Main tick ─────────────────────────────────────────────────────────────
     def _tick(self):
+        if self.state == self.DONE:
+            return   # land cmd already sent; stop all offboard publishing
         self._pub_offboard()
 
         if self.state == self.INIT:
@@ -187,7 +189,8 @@ class CircleFlight(Node):
         elif self.state == self.FLYING:
             x, y = self._traj(self.t_fly)
             yaw  = self._heading(self.t_fly)
-            self._pub_setpoint([x, y, HEIGHT], yaw=yaw)
+            vx, vy = self._traj_vel(self.t_fly)   # analytic tangent velocity
+            self._pub_setpoint([x, y, HEIGHT], yaw=yaw, vel=[vx, vy, 0.0])
             self.t_fly       += 0.05
             self.total_angle  = OMEGA * self.t_fly
             if self.total_angle >= LAPS * 2 * math.pi:
@@ -202,7 +205,7 @@ class CircleFlight(Node):
                 self.state = self.DONE
 
         elif self.state == self.DONE:
-            self._pub_setpoint([0.0, 0.0, 0.0])
+            pass   # land command already sent; do not publish setpoints
 
     # ── Trajectory generators ─────────────────────────────────────────────────
     def _traj(self, t):
@@ -210,6 +213,17 @@ class CircleFlight(Node):
         if MODE == 'figure8':
             return RADIUS * math.cos(theta), RADIUS * math.sin(theta) * math.cos(theta)
         return RADIUS * math.cos(theta), RADIUS * math.sin(theta)
+
+    def _traj_vel(self, t):
+        """Analytic velocity (tangent to trajectory) — avoids oscillation."""
+        theta = OMEGA * t
+        if MODE == 'figure8':
+            # d/dt [R*cos(ωt), R*sin(ωt)*cos(ωt)]
+            vx = -RADIUS * OMEGA * math.sin(theta)
+            vy =  RADIUS * OMEGA * math.cos(2 * theta)
+            return vx, vy
+        # circle: d/dt [R*cos(ωt), R*sin(ωt)]
+        return -RADIUS * OMEGA * math.sin(theta), RADIUS * OMEGA * math.cos(theta)
 
     def _heading(self, t):
         if MODE == 'figure8':
@@ -225,17 +239,24 @@ class CircleFlight(Node):
         msg.timestamp    = int(self.get_clock().now().nanoseconds / 1000)
         self.offboard_pub.publish(msg)
 
-    def _pub_setpoint(self, pos, yaw=0.0):
+    def _pub_setpoint(self, pos, yaw=0.0, vel=None):
         msg = TrajectorySetpoint()
         msg.position  = [float(pos[0]), float(pos[1]), float(pos[2])]
         msg.yaw       = float(yaw)
         msg.timestamp = int(self.get_clock().now().nanoseconds / 1000)
 
-        # Add velocity towards target (same as SmartNavigator)
-        if self.pos:
+        if vel is not None:
+            # Explicit velocity provided (e.g. analytic circle tangent)
+            msg.velocity = [float(v) for v in vel]
+        elif self.pos:
+            # Waypoint nav: velocity = clamped error vector
             dx = pos[0] - self.pos[0]
             dy = pos[1] - self.pos[1]
             dz = pos[2] - self.pos[2]
+            speed = math.sqrt(dx*dx + dy*dy + dz*dz)
+            if speed > 2.0:
+                scale = 2.0 / speed
+                dx, dy, dz = dx*scale, dy*scale, dz*scale
             msg.velocity = [dx, dy, dz]
 
         self.setpoint_pub.publish(msg)
@@ -264,7 +285,9 @@ def main(args=None):
     try:
         rclpy.spin(node)
     except KeyboardInterrupt:
-        pass
+        if node.state not in (CircleFlight.DONE, CircleFlight.INIT):
+            node.get_logger().info('Interrupted — sending land command')
+            node._send_cmd(VehicleCommand.VEHICLE_CMD_NAV_LAND)
     finally:
         node.destroy_node()
         rclpy.shutdown()
