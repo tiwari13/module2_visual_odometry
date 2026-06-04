@@ -37,13 +37,36 @@ from scipy.spatial.transform import Rotation
 import cv2
 import numpy as np
 import time
+import os
+import yaml
+from ament_index_python.packages import get_package_share_directory
 
-# ── Camera intrinsics (Module 1 calibration) ─────────────────────────────────
-K = np.array([
-    [1397.22,    0.0,  960.0],
-    [   0.0, 1397.22,  540.0],
-    [   0.0,    0.0,    1.0]
-], dtype=np.float64)
+# ── Camera intrinsics — loaded from sim_assets/config/calibration.yaml ──
+# main() calls _load_left_camera_config() and rebinds K + LEFT_IMAGE_TOPIC
+# before the node is created.  Fails loud if the calibration is missing —
+# no hardcoded fallback, by design.
+K                = None
+LEFT_IMAGE_TOPIC = None
+
+
+def _load_left_camera_config():
+    """Load left-camera intrinsics + image topic from calibration.yaml.
+
+    Returns (K, image_topic, cal_path) where K is a 3x3 float64 intrinsic
+    matrix and image_topic is the canonical ROS topic for the left mono
+    stream.  Raises on any missing block — never falls back to defaults.
+    """
+    pkg_share = get_package_share_directory('sim_assets')
+    cal_path  = os.path.join(pkg_share, 'config', 'calibration.yaml')
+    with open(cal_path) as f:
+        cal = yaml.safe_load(f)
+    left = cal['units']['cam_front']['sensors']['left']
+    fx, fy, cx, cy = [float(v) for v in left['intrinsics']]
+    K = np.array([[fx,  0., cx],
+                  [0.,  fy, cy],
+                  [0.,  0.,  1.]], dtype=np.float64)
+    image_topic = left['rostopic']
+    return K, image_topic, cal_path
 
 # ── Tuning parameters ─────────────────────────────────────────────────────────
 MAX_FEATURES   = 500    # Shi-Tomasi corners to detect
@@ -103,11 +126,7 @@ class MonocularVO(Node):
         )
 
         # ── Subscriptions ─────────────────────────────────────────────────────
-        cam_topic = (
-            '/world/default/model/x500_skydio_0/model'
-            '/camera_front/link/camera_link/sensor/IMX214/image'
-        )
-        self.create_subscription(Image, cam_topic, self._image_cb, 10)
+        self.create_subscription(Image, LEFT_IMAGE_TOPIC, self._image_cb, 10)
 
         sensor_qos = rclpy.qos.QoSProfile(
             reliability=rclpy.qos.ReliabilityPolicy.BEST_EFFORT,
@@ -124,7 +143,7 @@ class MonocularVO(Node):
         self.create_timer(5.0, self._status_cb)
 
         self.get_logger().info("=" * 60)
-        self.get_logger().info("PHASE 2  Step 6: Monocular Visual Odometry")
+        self.get_logger().info("PHASE 3  Monocular VO baseline (Step 6 algorithm, calibration.yaml-driven)")
         self.get_logger().info("=" * 60)
         self.get_logger().info("Using KLT tracking + keyframe selection")
         self.get_logger().info("Fly a circle with circle_flight, then Ctrl+C")
@@ -138,10 +157,16 @@ class MonocularVO(Node):
 
     # ── Main image callback ───────────────────────────────────────────────────
     def _image_cb(self, msg):
-        gray = cv2.cvtColor(
-            self.bridge.imgmsg_to_cv2(msg, 'bgr8'),
-            cv2.COLOR_BGR2GRAY
-        )
+        # OAK-D left publishes mono8; replay of older color bags still works
+        # because we branch on the actual encoding rather than assuming.
+        enc = msg.encoding.lower()
+        if enc in ('mono8', '8uc1'):
+            gray = self.bridge.imgmsg_to_cv2(msg, desired_encoding='mono8')
+        else:
+            gray = cv2.cvtColor(
+                self.bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8'),
+                cv2.COLOR_BGR2GRAY,
+            )
         self.frame_count += 1
 
         # ── First frame: initialise ───────────────────────────────────────────
@@ -290,7 +315,7 @@ class MonocularVO(Node):
         # ── Publish pose for Step 8 EKF VIO ──────────────────────────────────
         pose_msg = PoseStamped()
         pose_msg.header.stamp    = self.get_clock().now().to_msg()
-        pose_msg.header.frame_id = 'camera'
+        pose_msg.header.frame_id = 'monocular_vo_odom'
         pose_msg.pose.position.x = float(self.t_world[0, 0])
         pose_msg.pose.position.y = float(self.t_world[1, 0])
         pose_msg.pose.position.z = float(self.t_world[2, 0])
@@ -341,7 +366,7 @@ class MonocularVO(Node):
         import matplotlib.pyplot as plt
 
         print("\n" + "=" * 70)
-        print("PHASE 2 — Step 6: MONOCULAR VO REPORT")
+        print("PHASE 3 — MONOCULAR VO BASELINE REPORT")
         print("=" * 70)
 
         if not self.keyframe_log:
@@ -441,8 +466,17 @@ class MonocularVO(Node):
 
 
 def main(args=None):
+    global K, LEFT_IMAGE_TOPIC
+    K, LEFT_IMAGE_TOPIC, cal_path = _load_left_camera_config()
+
     rclpy.init(args=args)
     node = MonocularVO()
+    node.get_logger().info(f"Loaded calibration from {cal_path}")
+    node.get_logger().info(
+        f"  K: fx={K[0,0]:.2f}  fy={K[1,1]:.2f}  "
+        f"cx={K[0,2]:.1f}  cy={K[1,2]:.1f}"
+    )
+    node.get_logger().info(f"  image topic: {LEFT_IMAGE_TOPIC}")
     try:
         rclpy.spin(node)
     except KeyboardInterrupt:
@@ -450,7 +484,8 @@ def main(args=None):
         node.generate_report()
     finally:
         node.destroy_node()
-        rclpy.shutdown()
+        if rclpy.ok():
+            rclpy.shutdown()
 
 
 if __name__ == '__main__':
