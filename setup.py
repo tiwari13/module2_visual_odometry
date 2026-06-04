@@ -15,14 +15,12 @@ setup(
     zip_safe=True,
     maintainer='ajay',
     maintainer_email='ajay@drone.dev',
-    description='Phase 2: Visual Odometry',
+    description='Mission planners (circle_flight) and benchmark world setup (spawn_landmarks) for the drone test stack.',
     license='MIT',
     entry_points={
         'console_scripts': [
-            'epipolar_geometry  = module2_visual_odometry.epipolar_geometry:main',
-            'circle_flight      = module2_visual_odometry.circle_flight:main',
-            'spawn_landmarks    = module2_visual_odometry.spawn_landmarks:main',
-            'monocular_vo       = module2_visual_odometry.monocular_vo:main',
+            'circle_flight   = module2_visual_odometry.circle_flight:main',
+            'spawn_landmarks = module2_visual_odometry.spawn_landmarks:main',
         ],
     },
 )

@@ -3,7 +3,7 @@
 <package format="3">
   <name>module2_visual_odometry</name>
   <version>0.0.1</version>
-  <description>Phase 2: Visual Odometry — Epipolar Geometry through Multi-Camera VIO</description>
+  <description>Mission planners (circle_flight) and benchmark world setup (spawn_landmarks) for the drone test stack. Monocular VO was cut 2026-06-04 — see meta repo ROADMAP.md Phase 3 for rationale. The real flight estimator lives in module3_vio.</description>
   <maintainer email="ajay@drone.dev">ajay</maintainer>
   <license>MIT</license>
 
