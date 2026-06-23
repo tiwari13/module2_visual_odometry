@@ -19,10 +19,15 @@ import math
 import time
 
 
-# Box positions: ring at flight altitude around the circle
-FLIGHT_HEIGHT = 3.0   # metres (positive, Gazebo Z-up)
-RING_RADIUS   = 8.0   # slightly outside the flight circle
-N_BOXES       = 12    # number of landmark boxes
+# Landmark field: multiple rings (inside + outside the 5 m flight circle) at
+# several heights, so the tangent-facing front camera always has >=15 features
+# in view (OpenVINS init needs >=15; a single sparse ring gave ~11 -> never init).
+FLIGHT_HEIGHT = 3.0                  # metres (positive, Gazebo Z-up)
+RING_RADII    = [4.0, 7.0, 10.0]     # inside, on, and outside the flight circle
+RING_HEIGHTS  = [1.5, 3.0, 4.5]      # fill vertical FOV
+BOXES_PER_RING = 12                  # per (radius, height) ring
+RING_RADIUS   = 7.0                  # kept for log message compatibility
+N_BOXES       = len(RING_RADII) * len(RING_HEIGHTS) * BOXES_PER_RING  # 108
 
 
 BOX_SDF_TEMPLATE = """<?xml version="1.0" ?>
@@ -85,19 +90,24 @@ class SpawnLandmarks(Node):
         ]
 
         ok = 0
-        for i in range(N_BOXES):
-            angle = 2 * math.pi * i / N_BOXES
-            x = RING_RADIUS * math.cos(angle)
-            y = RING_RADIUS * math.sin(angle)
-            z = FLIGHT_HEIGHT
-            r, g, b = colours[i % len(colours)]
-            name = f'landmark_{i:02d}'
-
-            if spawn_box(name, x, y, z, r, g, b):
-                ok += 1
-                self.get_logger().info(f"  ✔ {name} at ({x:.1f}, {y:.1f}, {z:.1f})")
-            else:
-                self.get_logger().warn(f"  ✗ Failed to spawn {name}")
+        i = 0
+        for ri, radius in enumerate(RING_RADII):
+            for hi, z in enumerate(RING_HEIGHTS):
+                # stagger angle per ring so boxes don't line up radially
+                offset = 2 * math.pi * (ri * 0.33 + hi * 0.17) / BOXES_PER_RING
+                for k in range(BOXES_PER_RING):
+                    angle = 2 * math.pi * k / BOXES_PER_RING + offset
+                    x = radius * math.cos(angle)
+                    y = radius * math.sin(angle)
+                    r, g, b = colours[i % len(colours)]
+                    name = f'lm_r{radius:.0f}_h{z:.0f}_{k:02d}'
+                    if spawn_box(name, x, y, z, r, g, b):
+                        ok += 1
+                    else:
+                        self.get_logger().warn(f"  ✗ Failed to spawn {name}")
+                    i += 1
+        self.get_logger().info(f"  spawned {ok} ring boxes across "
+                               f"{len(RING_RADII)} radii × {len(RING_HEIGHTS)} heights")
 
         # Also add a textured ground pattern (4 large flat boxes)
         for i, (gx, gy) in enumerate([(5,5),(-5,5),(-5,-5),(5,-5)]):
