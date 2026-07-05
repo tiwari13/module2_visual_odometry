@@ -61,8 +61,15 @@ _MODEL_SDF = """<?xml version="1.0" ?>
 def _gz(args, req):
     """Call a gz service; return (ok, stdout). req is the text-format request.
 
-    The SDF body contains double-quotes, so the request string MUST be delimited
-    with SINGLE quotes (the original bug used double quotes -> silent parse fail).
+    Two things the request MUST get right or the create fails SILENTLY (gz still
+    exits 0 and logs the parse error only to stderr):
+      1. SINGLE-quote delimiter — the SDF body is full of double-quotes.
+      2. SINGLE LINE — protobuf text-format rejects string literals that cross
+         line boundaries ("String literals cannot cross line boundaries"), so the
+         SDF must be collapsed to one line before it goes in `--req` (see spawn_box).
+    Success is judged by the ABSENCE of a protobuf parse error in stderr: the
+    reply itself sometimes times out on stdout even though the entity was created,
+    so `data: true` is an unreliable positive signal.
     """
     out = subprocess.run(
         ["gz", "service", "-s", args["s"],
@@ -70,13 +77,14 @@ def _gz(args, req):
          "--timeout", "3000", "--req", req],
         capture_output=True, text=True,
     )
-    ok = out.returncode == 0 and "data: true" in out.stdout
+    ok = "Error parsing text-format" not in out.stderr
     return ok, (out.stdout + out.stderr).strip()
 
 
 def spawn_box(name, x, y, z, r, g, b, sx=1.0, sy=1.0, sz=1.5):
     sdf = _MODEL_SDF.format(name=name, x=x, y=y, z=z, r=r, g=g, b=b,
-                            sx=sx, sy=sy, sz=sz).strip()
+                            sx=sx, sy=sy, sz=sz)
+    sdf = " ".join(sdf.split())   # collapse to ONE line (see _gz docstring)
     return _gz({"s": "/world/default/create", "reqtype": "gz.msgs.EntityFactory"},
                f"sdf: '{sdf}'")[0]
 
